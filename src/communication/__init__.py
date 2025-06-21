@@ -1,0 +1,1 @@
+"""Communication module for inter-agent messaging."""
