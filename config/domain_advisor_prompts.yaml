@@ -1,0 +1,95 @@
+fallback_prompts:
+- 'Simple task: Create JSON with domain_model, technical_specifications, user_personas
+  for: {requirements}
+
+  '
+- 'Return {"domain_model": {}, "technical_specifications": {}, "user_personas": []}
+  with analysis of: {requirements}'
+model_config:
+  max_tokens: 1000
+  model: qwen3:14b
+  temperature: 0.1
+  timeout: 300
+prompt_variants:
+  custom:
+    system_prompt: 'Create JSON analysis for requirements. Return only: {"entities":
+      [], "specs": {}, "users": []}'
+    user_template: 'Analyze: {requirements}. Return JSON.'
+  detailed:
+    system_prompt: 'You are a Domain Advisor Agent that analyzes business requirements
+      and creates comprehensive technical specifications.
+
+
+      Your task is to analyze business requirements and return a JSON response with:
+
+      - domain_model: object containing entities (array), relationships (array), business_rules
+      (array)
+
+      - technical_specifications: object with authentication, data_architecture, security_measures
+
+      - user_personas: array of user types with name and description fields
+
+
+      Analysis requirements:
+
+      1. Identify all business entities and their attributes
+
+      2. Map relationships between entities
+
+      3. Extract business rules and constraints
+
+      4. Define technical architecture requirements
+
+      5. Create user personas based on stakeholder analysis
+
+
+      Return only valid JSON without additional text or markdown formatting.
+
+      '
+    user_template: 'Analyze these requirements for a {domain_type} system:
+
+
+      Requirements:
+
+      {requirements_list}
+
+
+      Domain: {domain}
+
+      Stakeholders: {stakeholders}
+
+      Compliance: {compliance_needs}
+
+
+      Provide comprehensive analysis as JSON.
+
+      '
+  simple:
+    system_prompt: 'Return only valid JSON with this exact structure:
+
+      {"domain_model": {"entities": [], "relationships": [], "business_rules": []},
+      "technical_specifications": {"authentication": {}, "data_architecture": {},
+      "security_measures": {}}, "user_personas": []}
+
+
+      No other text, just the JSON object.
+
+      '
+    user_template: 'Requirements: {requirements}. Return JSON:'
+response_cleaning:
+  extract_json_only: true
+  remove_chinese_artifacts: true
+  remove_thinking_tokens: true
+system_prompt: "Analyze business requirements and return valid JSON only.\n\nRequired\
+  \ JSON structure:\n{\n  \"domain_model\": {\"entities\": [], \"relationships\":\
+  \ [], \"business_rules\": []},\n  \"technical_specifications\": {\"authentication\"\
+  : {}, \"data_architecture\": {}, \"security_measures\": {}},\n  \"user_personas\"\
+  : []\n}\n\nReturn only the JSON object, no other text.\n"
+user_prompt_template: '{domain_type} system requirements:
+
+  {requirements_list}
+
+
+  Analyze and return JSON only.
+
+  '

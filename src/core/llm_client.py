@@ -12,6 +12,7 @@ import httpx
 from dataclasses import asdict
 
 from .types import LLMRequest, LLMResponse
+from .ollama_client import OllamaProvider
 
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,12 @@ class LLMClient:
         self.config = config
         self.anthropic_api_key = config.get("anthropic_api_key")
         self.openai_api_key = config.get("openai_api_key")
+        self.ollama_base_url = config.get("ollama_base_url", "http://localhost:11434")
         self.default_provider = config.get("default_provider", "anthropic")
+        
+        # Initialize Ollama provider if needed
+        if self.default_provider == "ollama" or config.get("enable_ollama", False):
+            self.ollama_provider = OllamaProvider(self.ollama_base_url)
         self.max_retries = config.get("max_retries", 3)
         self.retry_delay = config.get("retry_delay", 1.0)
         self.timeout = config.get("timeout", 60.0)
@@ -58,6 +64,8 @@ class LLMClient:
                     response = await self._call_anthropic(request)
                 elif provider == "openai":
                     response = await self._call_openai(request)
+                elif provider == "ollama":
+                    response = await self._call_ollama(request)
                 else:
                     raise ValueError(f"Unsupported provider: {provider}")
                 
@@ -169,12 +177,21 @@ class LLMClient:
                 success=True
             )
     
+    async def _call_ollama(self, request: LLMRequest) -> LLMResponse:
+        """Call Ollama API."""
+        if not hasattr(self, 'ollama_provider'):
+            self.ollama_provider = OllamaProvider(self.ollama_base_url)
+        
+        return await self.ollama_provider.generate_response(request)
+    
     def _determine_provider(self, model: str) -> str:
         """Determine which provider to use based on model name."""
         if "claude" in model.lower():
             return "anthropic"
         elif "gpt" in model.lower():
             return "openai"
+        elif "qwen" in model.lower() or "ollama" in model.lower():
+            return "ollama"
         else:
             return self.default_provider
     
@@ -217,49 +234,82 @@ class LLMClient:
     
     def _extract_json_from_response(self, content: str) -> Dict[str, Any]:
         """Extract JSON from LLM response content."""
-        # Try to find JSON in the response
-        start_markers = ["```json", "{", "["]
-        end_markers = ["```", "}", "]"]
-        
         # First try direct JSON parsing
         try:
             return json.loads(content)
         except json.JSONDecodeError:
             pass
         
-        # Try to extract JSON from code blocks or find JSON-like content
-        for start_marker in start_markers:
-            start_idx = content.find(start_marker)
-            if start_idx != -1:
-                if start_marker == "```json":
-                    start_idx += len(start_marker)
-                    end_idx = content.find("```", start_idx)
-                    if end_idx != -1:
-                        json_content = content[start_idx:end_idx].strip()
+        # Try to extract JSON from markdown code blocks
+        json_start = content.find("```json")
+        if json_start != -1:
+            json_start += len("```json")
+            json_end = content.find("```", json_start)
+            if json_end != -1:
+                json_content = content[json_start:json_end].strip()
+                try:
+                    return json.loads(json_content)
+                except json.JSONDecodeError:
+                    pass
+        
+        # Try to find complete JSON object (prioritize objects over arrays)
+        # Look for main JSON object starting with {
+        brace_start = content.find("{")
+        if brace_start != -1:
+            bracket_count = 0
+            start_found = False
+            in_string = False
+            escape_next = False
+            
+            for i, char in enumerate(content[brace_start:], brace_start):
+                if escape_next:
+                    escape_next = False
+                    continue
+                    
+                if char == "\\" and in_string:
+                    escape_next = True
+                    continue
+                    
+                if char == '"' and not escape_next:
+                    in_string = not in_string
+                    continue
+                    
+                if not in_string:
+                    if char == "{":
+                        if not start_found:
+                            start_found = True
+                        bracket_count += 1
+                    elif char == "}":
+                        bracket_count -= 1
+                        if bracket_count == 0 and start_found:
+                            json_content = content[brace_start:i+1]
+                            try:
+                                return json.loads(json_content)
+                            except json.JSONDecodeError:
+                                # Continue looking for another complete JSON object
+                                bracket_count = 0
+                                start_found = False
+                                continue
+        
+        # If no object found, try arrays
+        array_start = content.find("[")
+        if array_start != -1:
+            bracket_count = 0
+            start_found = False
+            
+            for i, char in enumerate(content[array_start:], array_start):
+                if char == "[":
+                    if not start_found:
+                        start_found = True
+                    bracket_count += 1
+                elif char == "]":
+                    bracket_count -= 1
+                    if bracket_count == 0 and start_found:
+                        json_content = content[array_start:i+1]
                         try:
                             return json.loads(json_content)
                         except json.JSONDecodeError:
-                            continue
-                
-                # Try to find complete JSON object/array
-                if start_marker in ["{", "["]:
-                    end_marker = "}" if start_marker == "{" else "]"
-                    bracket_count = 0
-                    start_found = False
-                    
-                    for i, char in enumerate(content[start_idx:], start_idx):
-                        if char == start_marker:
-                            if not start_found:
-                                start_found = True
-                            bracket_count += 1
-                        elif char == end_marker:
-                            bracket_count -= 1
-                            if bracket_count == 0 and start_found:
-                                json_content = content[start_idx:i+1]
-                                try:
-                                    return json.loads(json_content)
-                                except json.JSONDecodeError:
-                                    break
+                            break
         
         # If all else fails, return the content as a string result
         return {"content": content, "parsed": False}

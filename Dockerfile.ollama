@@ -1,0 +1,19 @@
+# Dockerfile for Ollama with pre-loaded model
+FROM ollama/ollama:latest
+
+# Install curl for healthcheck
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
+
+# Create a startup script that pulls the model
+RUN echo '#!/bin/bash\n\
+ollama serve &\n\
+sleep 5\n\
+ollama pull qwen2.5:14b-instruct-q4_K_M || ollama pull qwen:14b || echo "Model pull failed, trying alternatives"\n\
+wait' > /start.sh && chmod +x /start.sh
+
+EXPOSE 11434
+
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
+  CMD curl -f http://localhost:11434/api/tags || exit 1
+
+CMD ["/start.sh"]
