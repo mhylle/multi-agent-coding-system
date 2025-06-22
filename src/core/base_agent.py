@@ -11,7 +11,7 @@ from typing import Dict, Any, Optional, List
 
 from .types import (
     Task, AgentResponse, AgentRole, ReviewResult, 
-    LLMRequest, TaskStatus
+    LLMRequest, TaskStatus, ImprovementContext
 )
 from .llm_client import get_llm_client
 
@@ -166,13 +166,26 @@ class BaseExecutor(ABC):
         self.llm_client = get_llm_client()
     
     async def execute(self, task: Task, execution_plan: Dict[str, Any], 
-                     context: Dict[str, Any] = None) -> Dict[str, Any]:
+                     context: Dict[str, Any] = None,
+                     improvement_context: Optional[ImprovementContext] = None) -> Dict[str, Any]:
         """
         Execute the task according to the execution plan.
         Coordinates with specialized services and LLMs.
+        
+        Args:
+            task: The task to execute
+            execution_plan: Plan from orchestrator
+            context: Execution context
+            improvement_context: Context from previous attempts with reviewer feedback
         """
         if context is None:
             context = {}
+        
+        # Add improvement context to the execution context if provided
+        if improvement_context:
+            context['improvement_context'] = improvement_context
+            logger.info(f"Executor {self.agent_id} attempting retry #{improvement_context.attempt_number} "
+                       f"with {len(improvement_context.reviewer_feedback)} feedback items")
         
         try:
             start_time = time.time()
@@ -312,6 +325,10 @@ class BaseAgent(ABC):
         self.status = TaskStatus.PENDING
         self.created_at = time.time()
         
+        # Retry configuration
+        self.max_retry_attempts = 2
+        self.retry_backoff_factor = 1.5
+        
         # Initialize components
         self.orchestrator = self._create_orchestrator()
         self.executor = self._create_executor()
@@ -357,51 +374,118 @@ class BaseAgent(ABC):
                     execution_time=time.time() - start_time
                 )
             
-            # Phase 2: Execution
-            logger.info(f"Agent {self.agent_id} starting execution for task {task.task_id}")
-            execution_result = await self.executor.execute(
-                task, orchestration_result["execution_plan"], context
-            )
+            # Phase 2 & 3: Execution and Review with Retry Loop
+            improvement_context = None
+            execution_results = []
+            review_results = []
             
-            if not execution_result.get("success", False):
-                return AgentResponse(
-                    success=False,
-                    error=execution_result.get("error", "Execution failed"),
-                    execution_time=time.time() - start_time
+            for attempt in range(self.max_retry_attempts + 1):
+                # Phase 2: Execution
+                logger.info(f"Agent {self.agent_id} starting execution for task {task.task_id} "
+                           f"(attempt {attempt + 1}/{self.max_retry_attempts + 1})")
+                
+                execution_result = await self.executor.execute(
+                    task, orchestration_result["execution_plan"], context, improvement_context
                 )
+                execution_results.append(execution_result)
+                
+                if not execution_result.get("success", False):
+                    return AgentResponse(
+                        success=False,
+                        error=execution_result.get("error", "Execution failed"),
+                        execution_time=time.time() - start_time,
+                        metadata={
+                            "agent_id": self.agent_id,
+                            "agent_role": self.role.value,
+                            "task_id": task.task_id,
+                            "attempts": attempt + 1,
+                            "execution_results": execution_results
+                        }
+                    )
+                
+                # Phase 3: Review
+                logger.info(f"Agent {self.agent_id} starting review for task {task.task_id}")
+                review_result = await self.reviewer.review(task, execution_result, context)
+                review_results.append(review_result)
+                
+                if review_result.approved:
+                    # Success! Exit the retry loop
+                    logger.info(f"Agent {self.agent_id} passed review on attempt {attempt + 1}")
+                    break
+                    
+                elif attempt < self.max_retry_attempts:
+                    # Failed review but have retries left
+                    logger.warning(f"Agent {self.agent_id} failed review on attempt {attempt + 1}, "
+                                 f"will retry with feedback. Score: {review_result.score:.2f}")
+                    
+                    # Create improvement context for next attempt
+                    if improvement_context is None:
+                        improvement_context = ImprovementContext(
+                            attempt_number=1,
+                            previous_results=[execution_result.get("result", {})],
+                            reviewer_feedback=review_result.issues,
+                            reviewer_suggestions=review_result.suggestions,
+                            quality_scores=[review_result.score],
+                            improvement_history=[f"Attempt 1 failed with score {review_result.score:.2f}"]
+                        )
+                    else:
+                        improvement_context.attempt_number += 1
+                        improvement_context.previous_results.append(execution_result.get("result", {}))
+                        improvement_context.reviewer_feedback.extend(review_result.issues)
+                        improvement_context.reviewer_suggestions.extend(review_result.suggestions)
+                        improvement_context.quality_scores.append(review_result.score)
+                        improvement_context.improvement_history.append(
+                            f"Attempt {attempt + 1} failed with score {review_result.score:.2f}"
+                        )
+                    
+                    # Add backoff delay before retry
+                    backoff_delay = (self.retry_backoff_factor ** attempt) * 2
+                    logger.info(f"Waiting {backoff_delay:.1f}s before retry...")
+                    await asyncio.sleep(backoff_delay)
+                else:
+                    # No more retries
+                    logger.error(f"Agent {self.agent_id} exhausted all {self.max_retry_attempts} retries")
             
-            # Phase 3: Review
-            logger.info(f"Agent {self.agent_id} starting review for task {task.task_id}")
-            review_result = await self.reviewer.review(task, execution_result, context)
-            
+            # Use the last review result for final response
+            final_review = review_results[-1]
             total_time = time.time() - start_time
-            self.status = TaskStatus.COMPLETED if review_result.approved else TaskStatus.FAILED
+            self.status = TaskStatus.COMPLETED if final_review.approved else TaskStatus.FAILED
             
             # Compile final response
             response = AgentResponse(
-                success=review_result.approved,
+                success=final_review.approved,
                 result=execution_result.get("result", {}),
-                error=None if review_result.approved else "Quality review failed",
-                feedback=review_result.issues + review_result.suggestions,
-                confidence=review_result.score,
+                error=None if final_review.approved else "Quality review failed after all retries",
+                feedback=final_review.issues + final_review.suggestions,
+                confidence=final_review.score,
                 execution_time=total_time,
                 metadata={
                     "agent_id": self.agent_id,
                     "agent_role": self.role.value,
                     "task_id": task.task_id,
                     "orchestration": orchestration_result,
-                    "execution": execution_result,
-                    "review": review_result,
+                    "total_attempts": len(execution_results),
+                    "execution_results": execution_results,
+                    "review_results": [
+                        {
+                            "approved": r.approved,
+                            "score": r.score,
+                            "issues": r.issues,
+                            "suggestions": r.suggestions
+                        } for r in review_results
+                    ],
+                    "improvement_context": improvement_context.__dict__ if improvement_context else None,
                     "workflow_times": {
                         "total": total_time,
                         "execution": execution_result.get("execution_time", 0)
                     }
                 },
-                suggestions=review_result.suggestions
+                suggestions=final_review.suggestions
             )
             
             logger.info(f"Agent {self.agent_id} completed task {task.task_id}: "
-                       f"success={response.success}, confidence={response.confidence:.2f}")
+                       f"success={response.success}, confidence={response.confidence:.2f}, "
+                       f"attempts={len(execution_results)}")
             
             return response
             

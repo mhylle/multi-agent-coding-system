@@ -104,6 +104,13 @@ class DomainAdvisorExecutor(BaseExecutor):
                            context: Dict[str, Any]) -> Dict[str, Any]:
         """Execute domain analysis according to the plan."""
         
+        # Check for improvement context
+        improvement_context = context.get('improvement_context')
+        if improvement_context:
+            logger.info(f"Executing with improvement context: attempt #{improvement_context.attempt_number}")
+            logger.info(f"Previous feedback: {improvement_context.reviewer_feedback}")
+            logger.info(f"Suggestions: {improvement_context.reviewer_suggestions}")
+        
         result = {
             "analysis_type": execution_plan.get("analysis_type", "general_analysis"),
             "domain_model": {},
@@ -142,12 +149,25 @@ class DomainAdvisorExecutor(BaseExecutor):
         """Perform domain modeling and entity extraction."""
         
         domain = task.metadata.get("domain", "general")
+        improvement_context = context.get('improvement_context')
         
-        prompt = EXECUTOR_DOMAIN_ANALYSIS_PROMPT.format(
+        # Build prompt with improvement feedback if available
+        base_prompt = EXECUTOR_DOMAIN_ANALYSIS_PROMPT.format(
             requirements=task.requirements,
             domain=domain,
             context=context
         )
+        
+        if improvement_context:
+            feedback_section = "\n\n## Previous Attempt Feedback:\n"
+            feedback_section += "\n### Issues from reviewer:\n"
+            feedback_section += "\n".join(f"- {issue}" for issue in improvement_context.reviewer_feedback[-5:])
+            feedback_section += "\n\n### Suggestions for improvement:\n"
+            feedback_section += "\n".join(f"- {suggestion}" for suggestion in improvement_context.reviewer_suggestions[-5:])
+            feedback_section += "\n\nPlease address these issues in your analysis."
+            prompt = base_prompt + feedback_section
+        else:
+            prompt = base_prompt
         
         request = LLMRequest(
             prompt=prompt,

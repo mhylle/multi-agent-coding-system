@@ -107,7 +107,7 @@ class Message:
 class LLMRequest:
     """Request to LLM provider."""
     prompt: str
-    model: str = "claude-3-sonnet-20240229"
+    model: str = "qwen3:14b"
     max_tokens: int = 4000
     temperature: float = 0.7
     system_prompt: Optional[str] = None
@@ -162,6 +162,19 @@ class WorkflowStep:
     parallel_group: Optional[str] = None
     estimated_duration: Optional[int] = None  # minutes
     status: TaskStatus = TaskStatus.PENDING
+
+
+@dataclass
+class ImprovementContext:
+    """Context passed to executors when retrying after review failure."""
+    attempt_number: int
+    previous_results: List[Dict[str, Any]] = field(default_factory=list)
+    reviewer_feedback: List[str] = field(default_factory=list)
+    reviewer_suggestions: List[str] = field(default_factory=list)
+    quality_scores: List[float] = field(default_factory=list)
+    improvement_history: List[str] = field(default_factory=list)
+    delegation_candidates: List[AgentRole] = field(default_factory=list)
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass  
